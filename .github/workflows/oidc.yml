@@ -9,17 +9,26 @@ jobs:
   show:
     runs-on: ubuntu-latest
     steps:
-      - name: Diagnose OIDC endpoint reachability
+      - name: Print OIDC claims
+        env:
+          PR_HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
         run: |
-          echo "id_token_url_set   = $([ -n "$ACTIONS_ID_TOKEN_REQUEST_URL" ] && echo yes || echo NO)"
-          echo "id_token_tok_set   = $([ -n "$ACTIONS_ID_TOKEN_REQUEST_TOKEN" ] && echo yes || echo NO)"
-          HOST=$(echo "$ACTIONS_ID_TOKEN_REQUEST_URL" | sed -E 's#https?://([^/]+).*#\1#')
-          echo "id_token_host      = $HOST"
-          echo "--- curl verbose (errors only) ---"
-          curl -sS -o /dev/null -w 'http=%{http_code} exit_is_next\n' \
-            -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
-            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=oidc-claim-probe" 2>&1 | tail -6
-          echo "curl_exit          = ${PIPESTATUS[0]}"
-          echo "--- control: can this runner reach the public API at all? ---"
-          curl -sS -o /dev/null -w 'api.github.com http=%{http_code}\n' https://api.github.com 2>&1 | tail -2
-          curl -sS -o /dev/null -w 'pypi.org      http=%{http_code}\n' https://pypi.org 2>&1 | tail -2
+          set +e
+          echo "id_token_url_set = $([ -n "$ACTIONS_ID_TOKEN_REQUEST_URL" ] && echo yes || echo NO)"
+          BODY=$(curl -s -w '\n__HTTP__%{http_code}' -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=oidc-claim-probe")
+          printf '%s' "$BODY" | python3 -c '
+          import sys, json, base64
+          raw = sys.stdin.read(); body, _, code = raw.rpartition("\n__HTTP__")
+          print("http_status =", code or "?", "| body_len =", len(body.strip()))
+          try: obj = json.loads(body)
+          except Exception: sys.exit(0)
+          tok = obj.get("value")
+          if not (isinstance(tok, str) and tok.count(".") == 2): sys.exit(0)
+          seg = tok.split(".")[1]; seg += "=" * (-len(seg) % 4)
+          cl = json.loads(base64.urlsafe_b64decode(seg))
+          print("===== OIDC claims (selected) =====")
+          for k in ("repository", "repository_owner", "repository_owner_id", "repository_visibility", "ref", "ref_type", "event_name", "actor"):
+              print(f"{k:22} = {cl.get(k)}")
+          ' 
+          echo "pr.head.repo            = $PR_HEAD_REPO"
